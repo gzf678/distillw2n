@@ -135,13 +135,14 @@ class StreamableModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         optimizer_g, optimizer_d = self.optimizers()
         # sch = self.lr_schedulers() 
-        inputs = batch[:, None, :] # 1:normal 2:ppw 3:vad
-        input = inputs[:, :,self.segment_length*2:self.segment_length*3]
-        input_0 = inputs[:, :,:32270]
-        # if random.random() < self.pseudo_rate:
-        #     input_0 = inputs[:, :, self.segment_length*1:self.segment_length*2] # normal
-        # else:
-        #     input_0 = inputs[:, :, :self.segment_length]  # ppw
+        # batch格式: [batch_size, 3*segment_length]
+        # 其中: [0:segment_length] = normal, [segment_length:2*segment_length] = whisper, [2*segment_length:3*segment_length] = vad
+        inputs = batch[:, None, :] # [batch_size, 1, 3*segment_length]
+        # input: normal语音（作为target）
+        input = inputs[:, :, :self.segment_length]  # [batch_size, 1, segment_length] = normal
+        # input_0: whisper语音（作为输入，生成normal）
+        input_0 = inputs[:, :, self.segment_length:self.segment_length*2]  # [batch_size, 1, segment_length] = whisper
+        # 使用normal语音提取说话人嵌入（因为whisper可能质量较差）
         spkemb = torch.cat([self.speaker_model.infer_segment(w16)[0] for w16 in input.squeeze().squeeze().cpu()], dim=0)
 
         # train generator
@@ -246,7 +247,8 @@ class StreamableModel(pl.LightningModule):
         # sch.step()
 
         # train discriminator
-        output, hubert_like = self.forward(input, spkemb)
+        # 判别器训练：用whisper生成normal，然后判别real(normal)和fake(generated)
+        output, hubert_like = self.forward(input_0, spkemb)
 
         stft_out = self.stft_discriminator(input)
         d_stft_loss = torch.mean(torch.relu(1 - stft_out))
@@ -313,8 +315,8 @@ class StreamableModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         import numpy as np
         inputs = batch[:, None, :]
-        input = inputs[:, :, :32270] # normal / ppw
-        whisper = inputs[:, :,32270:32270*2] # ppw
+        input = inputs[:, :, :self.segment_length] # normal / ppw
+        whisper = inputs[:, :,self.segment_length:self.segment_length*2] # ppw
         spkemb = torch.cat([self.speaker_model.infer_segment(w16)[0] for w16 in input.squeeze().squeeze().cpu()], dim=0)
         with torch.no_grad():
             output, _ = self.forward(whisper, spkemb)
